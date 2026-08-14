@@ -2,7 +2,7 @@
   "version": 2,
   "functions": {
     "api/anime.js": {
-      "maxDuration": 60
+      "maxDuration": 300
     }
   },
   "rewrites": [
@@ -13,6 +13,12 @@
     {
       "source": "/api/anime",
       "destination": "/api/anime.js"
+    }
+  ],
+  "crons": [
+    {
+      "path": "/api/anime",
+      "schedule": "*/10 * * * *"
     }
   ]
 }

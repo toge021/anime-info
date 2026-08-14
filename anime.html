@@ -410,6 +410,36 @@
             font-size: 12px;
         }
 
+        /* Progression */
+        .progress-wrap {
+            margin-bottom: 24px;
+            display: none;
+        }
+
+        .progress-label {
+            display: flex;
+            justify-content: space-between;
+            font-size: 13px;
+            color: var(--text-secondary);
+            margin-bottom: 8px;
+        }
+
+        .progress-track {
+            width: 100%;
+            height: 10px;
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid var(--border);
+            overflow: hidden;
+        }
+
+        .progress-fill {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(135deg, var(--accent), #9c27b0);
+            transition: width 0.4s ease;
+        }
+
         /* Footer */
         .footer {
             text-align: center;
@@ -486,20 +516,31 @@
 
                 <div id="alert" class="alert"></div>
 
+                <div id="progressWrap" class="progress-wrap">
+                    <div class="progress-label">
+                        <span id="progressPhase">-</span>
+                        <span id="progressCount">-</span>
+                    </div>
+                    <div class="progress-track">
+                        <div id="progressFill" class="progress-fill"></div>
+                    </div>
+                </div>
+
                 <button class="btn-download" id="downloadBtn" onclick="fetchAndDownload()">
                     <i class="fas fa-download"></i>
-                    <span>Télécharger le JSON complet</span>
+                    <span>Lancer / poursuivre l'extraction</span>
                 </button>
 
                 <div class="info-box">
                     <h3><i class="fas fa-info-circle"></i> À propos</h3>
-                    <p>Cet outil extrait l'intégralité du catalogue d'animés depuis Anime-Sama.to. Le fichier JSON contient :</p>
+                    <p>Cet outil extrait le catalogue d'animés depuis Anime-Sama.to, en ne conservant que les animes dont un flux de streaming réel a pu être vérifié (episodes.js exploitable). Le fichier JSON contient :</p>
                     <ul>
                         <li><i class="fas fa-check-circle"></i> Titre complet de chaque anime</li>
                         <li><i class="fas fa-check-circle"></i> URL directe vers la page</li>
                         <li><i class="fas fa-check-circle"></i> Slug unique pour l'identification</li>
                         <li><i class="fas fa-check-circle"></i> Date de l'extraction</li>
                     </ul>
+                    <p style="margin-top:12px;">L'extraction se fait par cycles successifs (le nombre de catalogues à vérifier est important) : le bouton relance automatiquement chaque cycle jusqu'à ce que le catalogue final soit prêt et publié.</p>
                 </div>
             </div>
 
@@ -513,11 +554,16 @@
         let animeData = null;
         let isLoading = false;
 
+        // Délai entre deux cycles /api/anime pendant le polling (ms)
+        const CYCLE_DELAY_MS = 2000;
+        // Sécurité anti-boucle infinie côté navigateur (nombre de cycles max)
+        const MAX_CYCLES = 500;
+
         // Création des particules
         function createParticles() {
             const particlesContainer = document.getElementById('particles');
             if (!particlesContainer) return;
-            
+
             for (let i = 0; i < 50; i++) {
                 const particle = document.createElement('div');
                 particle.className = 'particle';
@@ -537,50 +583,120 @@
             alert.className = `alert alert-${type}`;
             alert.textContent = message;
             alert.style.display = 'block';
+        }
+
+        function hideMessageLater() {
             setTimeout(() => {
-                alert.style.display = 'none';
+                document.getElementById('alert').style.display = 'none';
             }, 5000);
         }
 
-        // Mise à jour des stats
+        // Mise à jour des stats à partir du anime.json final (source, total, date)
         function updateStats(data) {
-            if (data) {
-                document.getElementById('totalAnimes').textContent = data.total || 0;
-                const date = new Date(data.scrape_date);
-                document.getElementById('scrapeDate').textContent = date.toLocaleDateString('fr-FR');
-                const sourceUrl = data.source || 'https://anime-sama.to';
-                document.getElementById('sourceUrl').textContent = sourceUrl.split('//')[1] || 'anime-sama.to';
+            if (!data) return;
+            document.getElementById('totalAnimes').textContent = data.total || 0;
+            const date = data.scrape_date ? new Date(data.scrape_date) : null;
+            document.getElementById('scrapeDate').textContent = date ? date.toLocaleDateString('fr-FR') : '-';
+            const sourceUrl = data.source || 'https://anime-sama.to';
+            document.getElementById('sourceUrl').textContent = sourceUrl.split('//')[1] || sourceUrl;
+        }
+
+        // Mise à jour de la barre de progression à partir d'une réponse de cycle
+        function updateProgress(payload) {
+            const wrap = document.getElementById('progressWrap');
+            const phaseEl = document.getElementById('progressPhase');
+            const countEl = document.getElementById('progressCount');
+            const fillEl = document.getElementById('progressFill');
+
+            wrap.style.display = 'block';
+
+            if (payload.phase === 'collecting') {
+                const { pages_faites, pages_total } = payload.progress;
+                phaseEl.textContent = 'Collecte du catalogue';
+                countEl.textContent = `${pages_faites} / ${pages_total || '?'} pages`;
+                const pct = pages_total ? Math.min(100, Math.round((pages_faites / pages_total) * 100)) : 0;
+                fillEl.style.width = pct + '%';
+            } else if (payload.phase === 'verifying') {
+                const { catalogues_verifies, catalogues_total, valides } = payload.progress;
+                phaseEl.textContent = 'Vérification des flux (episodes.js)';
+                countEl.textContent = `${catalogues_verifies} / ${catalogues_total} — ${valides} valides`;
+                const pct = catalogues_total ? Math.min(100, Math.round((catalogues_verifies / catalogues_total) * 100)) : 0;
+                fillEl.style.width = pct + '%';
             }
         }
 
-        // Récupération et téléchargement
+        // Récupère un cycle de l'API (fait avancer collecte/vérification, ou
+        // termine et publie anime.json sur GitHub une fois tout vérifié)
+        async function runCycle() {
+            const response = await fetch('/api/anime');
+            let data;
+            try {
+                data = await response.json();
+            } catch (e) {
+                throw new Error(`Réponse invalide du serveur (HTTP ${response.status})`);
+            }
+
+            if (!response.ok || data.error) {
+                throw new Error(data.error || `Erreur HTTP: ${response.status}`);
+            }
+
+            return data;
+        }
+
+        // Récupère le anime.json final publié sur GitHub à partir des infos
+        // renvoyées par l'API (repo/branch/path). Suppose que le dépôt cible
+        // est public ; si ce n'est pas le cas, il faut exposer un endpoint
+        // dédié côté serveur pour relayer ce contenu.
+        async function fetchFinalAnimeJson(github) {
+            const rawUrl = `https://raw.githubusercontent.com/${github.repo}/${github.branch}/${github.path}`;
+            const res = await fetch(rawUrl, { cache: 'no-store' });
+            if (!res.ok) {
+                throw new Error(`Impossible de lire le catalogue final publié sur GitHub (HTTP ${res.status})`);
+            }
+            return res.json();
+        }
+
+        // Lance/poursuit l'extraction : enchaîne les cycles /api/anime
+        // jusqu'à ce que le catalogue final soit prêt, puis le télécharge.
         async function fetchAndDownload() {
             if (isLoading) return;
-            
+
             isLoading = true;
             const btn = document.getElementById('downloadBtn');
             const originalHTML = btn.innerHTML;
-            btn.innerHTML = '<div class="loading-spinner"></div> Chargement en cours...';
             btn.disabled = true;
-            
+
             try {
-                showMessage('📡 Récupération du catalogue en cours...', 'info');
-                
-                const response = await fetch('/api/anime');
-                
-                if (!response.ok) {
-                    throw new Error(`Erreur HTTP: ${response.status}`);
+                let cycles = 0;
+                let finalPayload = null;
+
+                while (cycles < MAX_CYCLES) {
+                    cycles += 1;
+                    btn.innerHTML = '<div class="loading-spinner"></div> Cycle en cours...';
+
+                    const data = await runCycle();
+
+                    if (data.done) {
+                        finalPayload = data;
+                        break;
+                    }
+
+                    updateProgress(data);
+                    showMessage(`📡 ${data.note || 'Extraction en cours...'}`, 'info');
+
+                    await new Promise((r) => setTimeout(r, CYCLE_DELAY_MS));
                 }
-                
-                const data = await response.json();
-                
-                if (data.error) {
-                    throw new Error(data.error);
+
+                if (!finalPayload) {
+                    throw new Error("L'extraction n'a pas pu se terminer (trop de cycles). Relancez le bouton pour continuer.");
                 }
-                
-                animeData = data;
+
+                document.getElementById('progressWrap').style.display = 'none';
+                showMessage('📥 Récupération du catalogue final publié sur GitHub...', 'info');
+
+                animeData = await fetchFinalAnimeJson(finalPayload.github);
                 updateStats(animeData);
-                
+
                 // Création et téléchargement du fichier JSON
                 const jsonStr = JSON.stringify(animeData, null, 2);
                 const blob = new Blob([jsonStr], { type: 'application/json' });
@@ -592,12 +708,13 @@
                 a.click();
                 document.body.removeChild(a);
                 URL.revokeObjectURL(url);
-                
+
                 showMessage(`✅ Téléchargement terminé ! ${animeData.total} animes exportés.`, 'success');
-                
+                hideMessageLater();
             } catch (error) {
                 console.error('Erreur:', error);
                 showMessage(`❌ Erreur: ${error.message}`, 'error');
+                hideMessageLater();
             } finally {
                 isLoading = false;
                 btn.innerHTML = originalHTML;
@@ -605,22 +722,12 @@
             }
         }
 
-        // Initialisation avec chargement des données de cache
-        async function init() {
+        // Initialisation : aucune requête vers /api/anime ici, car chaque
+        // appel fait avancer un cycle d'extraction côté serveur. On se
+        // contente d'afficher l'interface ; les stats sont mises à jour
+        // seulement après un cycle complet (bouton cliqué).
+        function init() {
             createParticles();
-            
-            // Tentative de chargement des données sans téléchargement
-            try {
-                const response = await fetch('/api/anime');
-                if (response.ok) {
-                    const data = await response.json();
-                    if (!data.error) {
-                        updateStats(data);
-                    }
-                }
-            } catch (e) {
-                console.log('Cache non disponible, attendre téléchargement');
-            }
         }
 
         init();
