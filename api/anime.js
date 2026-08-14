@@ -317,7 +317,7 @@ async function verifyAnimeHasStream(catalogueUrl, slug) {
    ============================================================ */
 
 async function uploadAnimeJsonToGitHub(jsonData) {
-  const token = process.env.GITHUB_TOKEN || "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";
+  const token = process.env.GITHUB_TOKEN || "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";
   const targetRepo = process.env.GITHUB_TARGET_REPO || "ANIME-JSON";
   const targetPath = process.env.GITHUB_TARGET_PATH || "anime.json";
   const branch = process.env.GITHUB_TARGET_BRANCH || "main";
